@@ -765,8 +765,26 @@ const OCC_DB = {};
 function dbSet(o){
   OCC_DB[o.id] = o;
   if(window._fbDB){
-    window._fbDB.ref('ocorrencias/'+o.id).set(o).catch(console.error);
+    // Firebase não suporta arrays — converte para objeto antes de salvar
+    const payload = Object.assign({}, o, {
+      history: arrayToObj(o.history||[]),
+      midias:  arrayToObj(o.midias||[])
+    });
+    window._fbDB.ref('ocorrencias/'+o.id).set(payload).catch(console.error);
   }
+}
+// Converte array → objeto {0:{...},1:{...}} para o Firebase
+function arrayToObj(arr){
+  if(!arr||!arr.length) return {};
+  const obj={};
+  arr.forEach((item,i)=>{ obj[i]=item; });
+  return obj;
+}
+// Converte objeto Firebase → array (reconstrói na leitura)
+function objToArray(val){
+  if(!val) return [];
+  if(Array.isArray(val)) return val;
+  return Object.keys(val).sort((a,b)=>Number(a)-Number(b)).map(k=>val[k]);
 }
 function dbDel(id){
   delete OCC_DB[id];
@@ -1180,12 +1198,14 @@ function doDevolver(app,inputId){
   const id=app==='sci'?'sci':'ag';
   const occ=activeOcc[app];
   if(occ){
-    occ.history.push({status:'DEVOLVIDA',label:'Devolvida',ts:ts(),by:SESSION_ID,note:mot});
-    occ.status=app==='sci'?'CO':'RB'; // volta ao status inicial (devolveu, CIOPS pode redespachar)
+    if(!Array.isArray(occ.history)) occ.history=objToArray(occ.history);
+    if(!Array.isArray(occ.midias))  occ.midias=objToArray(occ.midias);
+    occ.history.push({status:'DEVOLVIDA',label:'Devolvida',ts:ts(),by:SESSION_ID||'aluno',note:mot});
+    occ.status=app==='sci'?'CO':'RB';
     occ.midias.push({tipo:'coment',texto:'DEVOLUÇÃO: '+mot,ts:ts()});
     dbSet(occ);
     refreshInstructorList();
-    activeOcc[app]=null; // remove da viatura
+    activeOcc[app]=null;
   }
   closeModal(id);
   showToast(id,'Ocorrência devolvida à CIOPS');
@@ -1213,7 +1233,9 @@ function confirmFinalizar(app){
   const code=document.getElementById('fin-code-'+app).value;
   const coment=document.getElementById('fin-coment-'+app).value.trim();
   const finalCode=app==='sci'?'FIN':'CT';
-  occ.history.push({status:finalCode,label:'Finalizada ('+code+')',ts:ts(),by:SESSION_ID,note:coment});
+  if(!Array.isArray(occ.history)) occ.history=objToArray(occ.history);
+  if(!Array.isArray(occ.midias))  occ.midias=objToArray(occ.midias);
+  occ.history.push({status:finalCode,label:'Finalizada ('+code+')',ts:ts(),by:SESSION_ID||'aluno',note:coment});
   occ.status=finalCode;
   if(coment) occ.midias.push({tipo:'coment',texto:'FINALIZAÇÃO ['+code+']: '+coment,ts:ts()});
   dbSet(occ);
@@ -1229,7 +1251,8 @@ function applyStatus(app,code,label,note){
   const occ=activeOcc[app];
   if(!occ) return;
   occ.status=code;
-  occ.history.push({status:code,label,ts:ts(),by:SESSION_ID,note:note||''});
+  if(!Array.isArray(occ.history)) occ.history=objToArray(occ.history);
+  occ.history.push({status:code,label,ts:ts(),by:SESSION_ID||'aluno',note:note||''});
   dbSet(occ);
   showToast(app==='sci'?'sci':'ag','Status: '+label);
   renderAll();
@@ -1259,16 +1282,29 @@ function sciComentario(){
     <button class="mbtn mbtn-c" onclick="closeModal('sci')">Cancelar</button>`);
 }
 function salvarComentario(app,inputId){
-  const v=document.getElementById(inputId).value.trim();
-  if(!v){showToast(app==='sci'?'sci':'ag','Digite um comentário');return}
+  const v=document.getElementById(inputId)?document.getElementById(inputId).value.trim():'';
+  const id=app==='sci'?'sci':'ag';
+  if(!v){showToast(id,'Digite um comentário');return}
   const occ=activeOcc[app];
-  if(occ){ occ.midias.push({tipo:'coment',texto:v,ts:ts()}); dbSet(occ); renderAll(); refreshInstructorList(); }
-  closeModal(app==='sci'?'sci':'ag');
-  showToast(app==='sci'?'sci':'ag','Comentário adicionado!');
+  if(occ){
+    if(!Array.isArray(occ.midias)) occ.midias=objToArray(occ.midias);
+    occ.midias.push({tipo:'coment',texto:v,ts:ts(),by:SESSION_ID||'aluno'});
+    dbSet(occ);
+    renderAll();
+    refreshInstructorList();
+  }
+  closeModal(id);
+  showToast(id,'Comentário adicionado!');
 }
 function addMidia(app,descricao){
   const occ=activeOcc[app];
-  if(occ){ occ.midias.push({tipo:'midia',texto:descricao,ts:ts()}); dbSet(occ); renderAll(); refreshInstructorList(); }
+  if(occ){
+    if(!Array.isArray(occ.midias)) occ.midias=objToArray(occ.midias);
+    occ.midias.push({tipo:'midia',texto:descricao,ts:ts(),by:SESSION_ID||'aluno'});
+    dbSet(occ);
+    renderAll();
+    refreshInstructorList();
+  }
   showToast(app==='sci'?'sci':'ag','Mídia anexada!');
 }
 function sciNavegar(){ showToast('sci','Iniciando GPS para o local da ocorrência…') }
@@ -1400,7 +1436,14 @@ async function initFirebase(){
     window._fbDB.ref('ocorrencias').on('value', snapshot => {
       Object.keys(OCC_DB).forEach(k => delete OCC_DB[k]);
       const data = snapshot.val();
-      if(data) Object.values(data).forEach(o => { OCC_DB[o.id] = o; });
+      if(data){
+        Object.values(data).forEach(o => {
+          // Reconverte history e midias de objeto Firebase para array
+          o.history = objToArray(o.history);
+          o.midias  = objToArray(o.midias);
+          OCC_DB[o.id] = o;
+        });
+      }
       if(CURRENT_MODE === 'instrutor') refreshInstructorList();
       refreshOccurrences();
     });
